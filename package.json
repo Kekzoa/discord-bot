@@ -1,0 +1,27 @@
+{
+  "name": "discord-bot",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Kekzoa/discord-bot.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/Kekzoa/discord-bot/issues"
+  },
+  "homepage": "https://github.com/Kekzoa/discord-bot#readme",
+  "dependencies": {
+    "discord.js": "^14.26.4",
+    "dotenv": "^17.4.2",
+    "sqlite": "^5.1.1",
+    "sqlite3": "^6.0.1"
+  }
+}
