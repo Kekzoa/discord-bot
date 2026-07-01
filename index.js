@@ -685,7 +685,7 @@ client.on('interactionCreate', async interaction => {
     } catch (err) {
       console.error('Scan member error:', err);
       return await interaction.editReply({
-        embeds: [embed('Scan Failed', 'The scan could not be completed.', color)]
+        embeds: [embed('Scan Failed', `Scan failed: ${err.message}`, color)]
       });
     }
   }
