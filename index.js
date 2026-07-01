@@ -42,7 +42,7 @@ async function scheduleVerification(guildId, userId) {
 
   try {
     const key = getTimerKey(guildId, userId);
-    
+
     // Cancel existing timer if any
     cancelVerification(guildId, userId);
 
@@ -55,9 +55,13 @@ async function scheduleVerification(guildId, userId) {
     const verificationTime = joinedAtValue + requiredTimeMs;
     const timeUntilVerification = verificationTime - Date.now();
 
+    const resolveGuild = async () => {
+      return await client.guilds.fetch(guildId).catch(() => null);
+    };
+
     if (timeUntilVerification <= 0) {
       // Member should already be verified, run immediately
-      const guild = client.guilds.cache.get(guildId);
+      const guild = await resolveGuild();
       if (guild) {
         await verifyMember(guild, userId);
       }
@@ -65,7 +69,7 @@ async function scheduleVerification(guildId, userId) {
       // Schedule verification for future time
       const timerId = setTimeout(async () => {
         try {
-          const guild = client.guilds.cache.get(guildId);
+          const guild = await resolveGuild();
           if (guild) {
             await verifyMember(guild, userId);
           }
