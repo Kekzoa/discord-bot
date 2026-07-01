@@ -64,6 +64,8 @@ async function initDB() {
   await ensureColumn('guilds', 'logChannelId', 'TEXT');
   await ensureColumn('guilds', 'warningLimit', 'INTEGER');
   await ensureColumn('guilds', 'lastProcessedMessageId', 'TEXT');
+  await ensureColumn('members', 'processed', 'INTEGER DEFAULT 0');
+  await ensureColumn('members', 'blacklisted', 'INTEGER DEFAULT 0');
   await ensureColumn('members', 'warnings', 'INTEGER DEFAULT 0');
 
   console.log('Database ready');
