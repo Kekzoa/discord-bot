@@ -28,9 +28,109 @@ const DYNO_ID = '155149108183695360';
 const DEFAULT_REQUIRED_MEMBER_TIME_MS = 1209600000;
 
 let db;
+const verificationTimers = new Map();
 
 process.on('unhandledRejection', err => console.error('Unhandled Rejection:', err));
 process.on('uncaughtException', err => console.error('Uncaught Exception:', err));
+
+function getTimerKey(guildId, userId) {
+  return `${guildId}:${userId}`;
+}
+
+async function scheduleVerification(guildId, userId) {
+  if (!db || !guildId || !userId) return;
+
+  try {
+    const key = getTimerKey(guildId, userId);
+    
+    // Cancel existing timer if any
+    cancelVerification(guildId, userId);
+
+    const record = await getMemberRecord(guildId, userId);
+    if (!record) return;
+
+    const config = await getGuildConfig(guildId);
+    const joinedAtValue = Number(record.joinedAt || Date.now());
+    const requiredTimeMs = Number(config.requiredMemberTimeMs ?? DEFAULT_REQUIRED_MEMBER_TIME_MS);
+    const verificationTime = joinedAtValue + requiredTimeMs;
+    const timeUntilVerification = verificationTime - Date.now();
+
+    if (timeUntilVerification <= 0) {
+      // Member should already be verified, run immediately
+      const guild = client.guilds.cache.get(guildId);
+      if (guild) {
+        await verifyMember(guild, userId);
+      }
+    } else {
+      // Schedule verification for future time
+      const timerId = setTimeout(async () => {
+        try {
+          const guild = client.guilds.cache.get(guildId);
+          if (guild) {
+            await verifyMember(guild, userId);
+          }
+        } catch (err) {
+          console.error('Scheduled verification error:', err);
+        }
+        verificationTimers.delete(key);
+      }, timeUntilVerification);
+
+      verificationTimers.set(key, timerId);
+      console.log(`Scheduled verification for ${userId} in ${guildId} at ${new Date(verificationTime).toISOString()}`);
+    }
+  } catch (err) {
+    console.error('Schedule verification error:', err);
+  }
+}
+
+function cancelVerification(guildId, userId) {
+  const key = getTimerKey(guildId, userId);
+  const timerId = verificationTimers.get(key);
+  
+  if (timerId) {
+    clearTimeout(timerId);
+    verificationTimers.delete(key);
+    console.log(`Cancelled verification timer for ${userId} in ${guildId}`);
+  }
+}
+
+async function restoreVerificationTimers() {
+  if (!db) return;
+
+  try {
+    // Get all members who haven't been processed yet
+    const unprocessedMembers = await db.all(
+      `SELECT guildId, userId FROM members WHERE processed = 0`
+    );
+
+    for (const member of unprocessedMembers) {
+      await scheduleVerification(member.guildId, member.userId);
+    }
+
+    console.log(`Restored ${unprocessedMembers.length} verification timers`);
+
+    // Also immediately verify any processed members who should have qualified while offline
+    const allMembers = await db.all(`SELECT guildId, userId FROM members`);
+    for (const member of allMembers) {
+      const record = await getMemberRecord(member.guildId, member.userId);
+      if (!record) continue;
+
+      const config = await getGuildConfig(member.guildId);
+      const joinedAtValue = Number(record.joinedAt || Date.now());
+      const requiredTimeMs = Number(config.requiredMemberTimeMs ?? DEFAULT_REQUIRED_MEMBER_TIME_MS);
+      
+      if (!record.processed && (Date.now() - joinedAtValue) >= requiredTimeMs) {
+        const guild = client.guilds.cache.get(member.guildId);
+        if (guild) {
+          await verifyMember(guild, member.userId);
+        }
+      }
+    }
+  } catch (err) {
+    console.error('Restore verification timers error:', err);
+  }
+}
+
 
 async function initDB() {
   db = await open({
@@ -460,6 +560,14 @@ client.on('guildMemberAdd', async member => {
      VALUES (?, ?, ?, 0, 0, 0)`,
     [member.guild.id, member.id, member.joinedAt?.getTime() || Date.now()]
   );
+
+  await scheduleVerification(member.guild.id, member.id);
+});
+
+client.on('guildMemberRemove', async member => {
+  if (!db || member.user.bot) return;
+
+  cancelVerification(member.guild.id, member.id);
 });
 
 client.on('messageCreate', async message => {
@@ -752,4 +860,5 @@ client.on('interactionCreate', async interaction => {
 client.once('ready', async () => {
   console.log(`Logged in as ${client.user.tag}`);
   await replayDynoEventsForAllGuilds();
+  await restoreVerificationTimers();
 });
