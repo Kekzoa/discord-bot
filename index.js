@@ -851,14 +851,14 @@ client.on('interactionCreate', async interaction => {
   }
 });
 
-(async () => {
-  await initDB();
-  await deployCommands();
-  await client.login(process.env.TOKEN);
-})();
-
 client.once('ready', async () => {
   console.log(`Logged in as ${client.user.tag}`);
   await replayDynoEventsForAllGuilds();
   await restoreVerificationTimers();
 });
+
+(async () => {
+  await initDB();
+  await deployCommands();
+  await client.login(process.env.TOKEN);
+})();
