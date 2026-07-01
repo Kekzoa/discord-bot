@@ -12,15 +12,20 @@ const sqlite3 = require('sqlite3');
 const { open } = require('sqlite');
 require('dotenv').config();
 
-console.log("TOKEN exists:", !!process.env.TOKEN);
-console.log("CLIENT_ID exists:", !!process.env.CLIENT_ID);
+console.log('TOKEN exists:', !!process.env.TOKEN);
+console.log('CLIENT_ID exists:', !!process.env.CLIENT_ID);
 
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMembers
+    GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent
   ]
 });
+
+const DYNO_ID = '155149108183695360';
+const DEFAULT_REQUIRED_MEMBER_TIME_MS = 1209600000;
 
 let db;
 
@@ -33,28 +38,48 @@ async function initDB() {
     driver: sqlite3.Database
   });
 
-  await db.run(`
+  await db.exec(`
     CREATE TABLE IF NOT EXISTS guilds (
       guildId TEXT PRIMARY KEY,
       memberRoleId TEXT,
       warnTriggerRoleId TEXT,
       requiredMemberTimeMs INTEGER DEFAULT 1209600000,
-      embedColor INTEGER DEFAULT 65280
-    )
-  `);
+      embedColor INTEGER DEFAULT 65280,
+      logChannelId TEXT,
+      warningLimit INTEGER,
+      lastProcessedMessageId TEXT
+    );
 
-  await db.run(`
     CREATE TABLE IF NOT EXISTS members (
       guildId TEXT,
       userId TEXT,
       joinedAt INTEGER,
       processed INTEGER DEFAULT 0,
       blacklisted INTEGER DEFAULT 0,
+      warnings INTEGER DEFAULT 0,
       PRIMARY KEY (guildId, userId)
-    )
+    );
   `);
 
+  await ensureColumn('guilds', 'logChannelId', 'TEXT');
+  await ensureColumn('guilds', 'warningLimit', 'INTEGER');
+  await ensureColumn('guilds', 'lastProcessedMessageId', 'TEXT');
+  await ensureColumn('members', 'warnings', 'INTEGER DEFAULT 0');
+
   console.log('Database ready');
+}
+
+async function ensureColumn(table, column, definition) {
+  const columns = await db.all(`PRAGMA table_info(${table})`);
+  const exists = columns.some(col => col.name === column);
+
+  if (!exists) {
+    await db.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  }
+
+  if (table === 'members' && column === 'warnings') {
+    await db.run(`UPDATE members SET warnings = 0 WHERE warnings IS NULL`);
+  }
 }
 
 function embed(title, description, color = 0x00ff00) {
@@ -68,7 +93,7 @@ function parseTime(input) {
   const match = input.toLowerCase().match(/^(\d+)(s|m|h|d)$/);
   if (!match) return null;
 
-  const value = parseInt(match[1]);
+  const value = parseInt(match[1], 10);
   const unit = match[2];
 
   switch (unit) {
@@ -88,6 +113,205 @@ async function getGuildConfig(guildId) {
   );
 
   return config || {};
+}
+
+async function getMemberRecord(guildId, userId) {
+  if (!db) return null;
+
+  return db.get(
+    `SELECT * FROM members WHERE guildId = ? AND userId = ?`,
+    [guildId, userId]
+  );
+}
+
+async function ensureMemberRecord(guildId, userId, joinedAt = Date.now()) {
+  if (!db) return null;
+
+  await db.run(
+    `INSERT OR IGNORE INTO members
+     (guildId, userId, joinedAt, processed, blacklisted, warnings)
+     VALUES (?, ?, ?, 0, 0, 0)`,
+    [guildId, userId, joinedAt]
+  );
+
+  return getMemberRecord(guildId, userId);
+}
+
+async function verifyMember(guild, userId) {
+  if (!db || !guild || !userId) return { qualified: false, changed: false };
+
+  try {
+    const config = await getGuildConfig(guild.id);
+    const member = await guild.members.fetch(userId).catch(() => null);
+    const record = await ensureMemberRecord(guild.id, userId, member?.joinedAt?.getTime() || Date.now());
+
+    const joinedAtValue = Number(member?.joinedAt?.getTime() || record?.joinedAt || Date.now());
+    const warnings = Number(record?.warnings || 0);
+    const requiredTimeMs = Number(config.requiredMemberTimeMs ?? DEFAULT_REQUIRED_MEMBER_TIME_MS);
+    const warningLimit = config.warningLimit === null || config.warningLimit === undefined ? null : Number(config.warningLimit);
+
+    const timeMet = (Date.now() - joinedAtValue) >= requiredTimeMs;
+    const warningMet = warningLimit === null || warnings < warningLimit;
+    const qualified = timeMet && warningMet;
+
+    const roleId = config.memberRoleId;
+    let changed = false;
+
+    if (member && roleId) {
+      const role = await guild.roles.fetch(roleId).catch(() => null);
+
+      if (role) {
+        if (qualified && !member.roles.cache.has(role.id)) {
+          await member.roles.add(role).catch(() => {});
+          changed = true;
+          console.log('Verification granted', guild.id, userId);
+        } else if (!qualified && member.roles.cache.has(role.id)) {
+          await member.roles.remove(role).catch(() => {});
+          changed = true;
+          console.log('Verification removed', guild.id, userId);
+        }
+      }
+    } else if (qualified) {
+      console.log('Verification granted', guild.id, userId);
+    } else {
+      console.log('Verification removed', guild.id, userId);
+    }
+
+    await db.run(
+      `UPDATE members
+       SET joinedAt = ?, processed = 1, warnings = ?
+       WHERE guildId = ? AND userId = ?`,
+      [joinedAtValue, warnings, guild.id, userId]
+    );
+
+    return {
+      qualified,
+      changed,
+      warnings,
+      timeMet,
+      warningMet,
+      joinedAtValue
+    };
+  } catch (err) {
+    console.error('Verification error:', err);
+    return { qualified: false, changed: false };
+  }
+}
+
+function extractUserIdFromMessage(message) {
+  const mention = message.mentions?.users?.first();
+  if (mention) return mention.id;
+
+  const match = `${message.content || ''} ${message.embeds?.map(embedInfo => `${embedInfo.description || ''} ${embedInfo.title || ''}`).join(' ') || ''}`.match(/<@!?([0-9]+)/);
+  if (match) return match[1];
+
+  const idMatch = `${message.content || ''} ${message.embeds?.map(embedInfo => `${embedInfo.description || ''} ${embedInfo.title || ''}`).join(' ') || ''}`.match(/\b([0-9]{17,20})\b/);
+  if (idMatch) return idMatch[1];
+
+  return null;
+}
+
+function parseDynoAction(message) {
+  const text = `${message.content || ''} ${message.embeds?.map(embedInfo => `${embedInfo.description || ''} ${embedInfo.title || ''}`).join(' ') || ''}`.toLowerCase();
+
+  if (/warnings? cleared/.test(text)) {
+    return { action: 'clear' };
+  }
+
+  if (/warning removed|warnings? removed/.test(text)) {
+    const amountMatch = text.match(/(\d+)\s+warning(s)?/i) || text.match(/(\d+)\s+warn(s)?/i);
+    return { action: 'remove', amount: amountMatch ? Number(amountMatch[1]) : 1 };
+  }
+
+  if (/warn|warning/.test(text)) {
+    const amountMatch = text.match(/(\d+)\s+warning(s)?/i) || text.match(/(\d+)\s+warn(s)?/i);
+    return { action: 'add', amount: amountMatch ? Number(amountMatch[1]) : 1 };
+  }
+
+  return null;
+}
+
+async function processDynoMessage(message) {
+  if (!db || !message?.guild || !message.author || message.author.id !== DYNO_ID) return;
+
+  const config = await getGuildConfig(message.guild.id);
+  if (!config.logChannelId || message.channel.id !== config.logChannelId) return;
+
+  const action = parseDynoAction(message);
+  if (!action) return;
+
+  const userId = extractUserIdFromMessage(message);
+  if (!userId) return;
+
+  const record = await ensureMemberRecord(message.guild.id, userId, Date.now());
+  const currentWarnings = Number(record?.warnings || 0);
+  let nextWarnings = currentWarnings;
+
+  if (action.action === 'clear') {
+    nextWarnings = 0;
+  } else if (action.action === 'remove') {
+    nextWarnings = Math.max(0, currentWarnings - action.amount);
+  } else if (action.action === 'add') {
+    nextWarnings = currentWarnings + action.amount;
+  }
+
+  await db.run(
+    `UPDATE members
+     SET warnings = ?, processed = 1
+     WHERE guildId = ? AND userId = ?`,
+    [nextWarnings, message.guild.id, userId]
+  );
+
+  await verifyMember(message.guild, userId);
+
+  if (!config.lastProcessedMessageId || BigInt(message.id) > BigInt(config.lastProcessedMessageId)) {
+    await db.run(
+      `INSERT INTO guilds (guildId, lastProcessedMessageId)
+       VALUES (?, ?)
+       ON CONFLICT(guildId)
+       DO UPDATE SET lastProcessedMessageId=excluded.lastProcessedMessageId`,
+      [message.guild.id, message.id]
+    );
+  }
+
+  console.log('Dyno event processed', action.action, userId);
+}
+
+async function replayDynoEvents(guild) {
+  if (!db || !guild) return;
+
+  const config = await getGuildConfig(guild.id);
+  if (!config.logChannelId) return;
+
+  const channel = await guild.channels.fetch(config.logChannelId).catch(() => null);
+  if (!channel || !channel.isTextBased?.()) return;
+
+  const messages = await channel.messages.fetch({ limit: 100 }).catch(() => new Map());
+  const sortedMessages = [...messages.values()].sort((a, b) => a.createdTimestamp - b.createdTimestamp);
+
+  for (const message of sortedMessages) {
+    if (!message || message.author?.id !== DYNO_ID) continue;
+    if (config.lastProcessedMessageId && BigInt(message.id) <= BigInt(config.lastProcessedMessageId)) continue;
+
+    await processDynoMessage(message);
+  }
+}
+
+async function replayDynoEventsForAllGuilds() {
+  if (!client.guilds?.cache?.size) {
+    console.log('Replay finished');
+    return;
+  }
+
+  for (const guild of client.guilds.cache.values()) {
+    try {
+      await replayDynoEvents(guild);
+    } catch (err) {
+      console.error('Replay error:', err);
+    }
+  }
+
+  console.log('Replay finished');
 }
 
 const commands = [
@@ -128,7 +352,84 @@ const commands = [
 
   new SlashCommandBuilder()
     .setName('memberstats')
-    .setDescription('Show stats')
+    .setDescription('Show stats'),
+
+  new SlashCommandBuilder()
+    .setName('warnings')
+    .setDescription('Show warning status')
+    .addUserOption(o =>
+      o.setName('user')
+        .setDescription('User to inspect')
+        .setRequired(true)
+    ),
+
+  new SlashCommandBuilder()
+    .setName('addwarnings')
+    .setDescription('Add warnings to a user')
+    .addUserOption(o =>
+      o.setName('user')
+        .setDescription('User to update')
+        .setRequired(true)
+    )
+    .addIntegerOption(o =>
+      o.setName('amount')
+        .setDescription('Amount to add')
+        .setRequired(true)
+    ),
+
+  new SlashCommandBuilder()
+    .setName('removewarnings')
+    .setDescription('Remove warnings from a user')
+    .addUserOption(o =>
+      o.setName('user')
+        .setDescription('User to update')
+        .setRequired(true)
+    )
+    .addIntegerOption(o =>
+      o.setName('amount')
+        .setDescription('Amount to remove')
+        .setRequired(true)
+    ),
+
+  new SlashCommandBuilder()
+    .setName('verifycheck')
+    .setDescription('Check one member')
+    .addUserOption(o =>
+      o.setName('user')
+        .setDescription('User to check')
+        .setRequired(true)
+    ),
+
+  new SlashCommandBuilder()
+    .setName('scanmember')
+    .setDescription('Check a single member')
+    .addUserOption(o =>
+      o.setName('user')
+        .setDescription('User to scan')
+        .setRequired(true)
+    ),
+
+  new SlashCommandBuilder()
+    .setName('setlogchannel')
+    .setDescription('Set Dyno log channel')
+    .addChannelOption(o =>
+      o.setName('channel')
+        .setDescription('Channel for Dyno logs')
+        .setRequired(true)
+    ),
+
+  new SlashCommandBuilder()
+    .setName('setwarninglimit')
+    .setDescription('Set warning limit')
+    .addIntegerOption(o =>
+      o.setName('amount')
+        .setDescription('Maximum warnings allowed')
+        .setRequired(true)
+    ),
+
+  new SlashCommandBuilder()
+    .setName('disablewarninglimit')
+    .setDescription('Disable warning limit checks')
 ].map(c => c.toJSON());
 
 async function deployCommands() {
@@ -149,22 +450,32 @@ async function deployCommands() {
 }
 
 client.on('guildMemberAdd', async member => {
-  if (!db) return;
-  if (member.user.bot) return;
+  if (!db || member.user.bot) return;
 
   await db.run(
     `INSERT OR IGNORE INTO members
-     (guildId, userId, joinedAt, processed, blacklisted)
-     VALUES (?, ?, ?, 0, 0)`,
+     (guildId, userId, joinedAt, processed, blacklisted, warnings)
+     VALUES (?, ?, ?, 0, 0, 0)`,
     [member.guild.id, member.id, member.joinedAt?.getTime() || Date.now()]
   );
 });
 
-client.on('interactionCreate', async interaction => {
-  if (!db) return;
-  if (!interaction.isChatInputCommand()) return;
+client.on('messageCreate', async message => {
+  if (!db || !message.guild) return;
 
-  const guildId = interaction.guild.id;
+  try {
+    await processDynoMessage(message);
+  } catch (err) {
+    console.error('Dyno message error:', err);
+  }
+});
+
+client.on('interactionCreate', async interaction => {
+  if (!db || !interaction.isChatInputCommand()) return;
+
+  const guildId = interaction.guild?.id;
+  if (!guildId) return;
+
   const config = await getGuildConfig(guildId);
   const color = config.embedColor || 0x00ff00;
 
@@ -242,21 +553,22 @@ client.on('interactionCreate', async interaction => {
     const members = await interaction.guild.members.fetch();
     let added = 0;
 
-    for (const m of members.values()) {
-      if (m.user.bot) continue;
+    for (const member of members.values()) {
+      if (member.user.bot) continue;
 
       const res = await db.run(
         `INSERT OR IGNORE INTO members
-         (guildId, userId, joinedAt, processed, blacklisted)
-         VALUES (?, ?, ?, 0, 0)`,
-        [guildId, m.id, m.joinedAt?.getTime() || Date.now()]
+         (guildId, userId, joinedAt, processed, blacklisted, warnings)
+         VALUES (?, ?, ?, 0, 0, 0)`,
+        [guildId, member.id, member.joinedAt?.getTime() || Date.now()]
       );
 
       if (res.changes > 0) added++;
+      await verifyMember(interaction.guild, member.id);
     }
 
     return interaction.editReply({
-      embeds: [embed('Scan Complete', `Added ${added} members`, color)]
+      embeds: [embed('Scan Complete', `Added ${added} members and ran verification`, color)]
     });
   }
 
@@ -275,6 +587,140 @@ client.on('interactionCreate', async interaction => {
       ]
     });
   }
+
+  if (interaction.commandName === 'warnings') {
+    const user = interaction.options.getUser('user');
+    const record = await ensureMemberRecord(guildId, user.id, Date.now());
+    const result = await verifyMember(interaction.guild, user.id);
+
+    return interaction.reply({
+      embeds: [
+        embed(
+          'Warning Status',
+          `User: ${user.tag}\nWarnings: ${record?.warnings || 0}\nVerified: ${result.qualified ? 'Yes' : 'No'}`,
+          color
+        )
+      ]
+    });
+  }
+
+  if (interaction.commandName === 'addwarnings') {
+    const user = interaction.options.getUser('user');
+    const amount = interaction.options.getInteger('amount');
+    const record = await ensureMemberRecord(guildId, user.id, Date.now());
+    const nextWarnings = (Number(record?.warnings || 0)) + amount;
+
+    await db.run(
+      `UPDATE members
+       SET warnings = ?, processed = 1
+       WHERE guildId = ? AND userId = ?`,
+      [nextWarnings, guildId, user.id]
+    );
+
+    await verifyMember(interaction.guild, user.id);
+
+    return interaction.reply({
+      embeds: [embed('Updated', `${user.tag} now has ${nextWarnings} warnings`, color)]
+    });
+  }
+
+  if (interaction.commandName === 'removewarnings') {
+    const user = interaction.options.getUser('user');
+    const amount = interaction.options.getInteger('amount');
+    const record = await ensureMemberRecord(guildId, user.id, Date.now());
+    const currentWarnings = Number(record?.warnings || 0);
+    const nextWarnings = Math.max(0, currentWarnings - amount);
+
+    await db.run(
+      `UPDATE members
+       SET warnings = ?, processed = 1
+       WHERE guildId = ? AND userId = ?`,
+      [nextWarnings, guildId, user.id]
+    );
+
+    await verifyMember(interaction.guild, user.id);
+
+    return interaction.reply({
+      embeds: [embed('Updated', `${user.tag} now has ${nextWarnings} warnings`, color)]
+    });
+  }
+
+  if (interaction.commandName === 'verifycheck') {
+    const user = interaction.options.getUser('user');
+    const result = await verifyMember(interaction.guild, user.id);
+
+    return interaction.reply({
+      embeds: [
+        embed(
+          'Verification Check',
+          `User: ${user.tag}\nQualified: ${result.qualified ? 'Yes' : 'No'}`,
+          color
+        )
+      ]
+    });
+  }
+
+  if (interaction.commandName === 'scanmember') {
+    await interaction.deferReply();
+    const user = interaction.options.getUser('user');
+
+    await ensureMemberRecord(guildId, user.id, Date.now());
+    await verifyMember(interaction.guild, user.id);
+
+    return interaction.editReply({
+      embeds: [embed('Scan Complete', `Checked ${user.tag}`, color)]
+    });
+  }
+
+  if (interaction.commandName === 'setlogchannel') {
+    const channel = interaction.options.getChannel('channel');
+
+    await db.run(
+      `INSERT INTO guilds (guildId, logChannelId)
+       VALUES (?, ?)
+       ON CONFLICT(guildId)
+       DO UPDATE SET logChannelId=excluded.logChannelId`,
+      [guildId, channel.id]
+    );
+
+    return interaction.reply({
+      embeds: [embed('Updated', 'Log channel set', color)]
+    });
+  }
+
+  if (interaction.commandName === 'setwarninglimit') {
+    const amount = interaction.options.getInteger('amount');
+
+    if (amount < 0) {
+      return interaction.reply({ content: 'Warning limit cannot be negative', ephemeral: true });
+    }
+
+    await db.run(
+      `INSERT INTO guilds (guildId, warningLimit)
+       VALUES (?, ?)
+       ON CONFLICT(guildId)
+       DO UPDATE SET warningLimit=excluded.warningLimit`,
+      [guildId, amount]
+    );
+
+    return interaction.reply({
+      embeds: [embed('Updated', `Warning limit set to ${amount}`, color)]
+    });
+  }
+
+  if (interaction.commandName === 'disablewarninglimit') {
+    await db.run(
+      `INSERT INTO guilds (guildId, warningLimit)
+       VALUES (?, ?)
+       ON CONFLICT(guildId)
+       DO UPDATE SET warningLimit=excluded.warningLimit`,
+      [guildId, null]
+    );
+
+    return interaction.reply({
+      embeds: [embed('Updated', 'Warning limit disabled', color)]
+    });
+  }
 });
 
 (async () => {
@@ -283,6 +729,7 @@ client.on('interactionCreate', async interaction => {
   await client.login(process.env.TOKEN);
 })();
 
-client.once('ready', () => {
+client.once('ready', async () => {
   console.log(`Logged in as ${client.user.tag}`);
+  await replayDynoEventsForAllGuilds();
 });
