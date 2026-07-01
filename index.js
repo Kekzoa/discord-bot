@@ -272,6 +272,17 @@ async function verifyMember(guild, userId) {
     const member = await guild.members.fetch(userId).catch(() => null);
     const record = await ensureMemberRecord(guild.id, userId, member?.joinedAt?.getTime() || Date.now());
 
+    console.log('verifyMember member diagnostics', {
+      guildId: guild.id,
+      memberId: member?.id,
+      guildName: guild.name,
+      memberJoinedAt: member?.joinedAt,
+      memberJoinedTimestamp: member?.joinedTimestamp,
+      recordJoinedAt: record?.joinedAt,
+      communicationDisabledUntil: member?.communicationDisabledUntil,
+      pending: member?.pending
+    });
+
     const joinedAtValue = Number(member?.joinedAt?.getTime() || record?.joinedAt || Date.now());
     const warnings = Number(record?.warnings || 0);
     const requiredTimeMs = Number(config.requiredMemberTimeMs ?? DEFAULT_REQUIRED_MEMBER_TIME_MS);
