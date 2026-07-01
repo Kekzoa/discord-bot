@@ -557,15 +557,19 @@ client.on('interactionCreate', async interaction => {
       for (const member of members.values()) {
         if (member.user.bot) continue;
 
-        const res = await db.run(
-          `INSERT OR IGNORE INTO members
-           (guildId, userId, joinedAt, processed, blacklisted, warnings)
-           VALUES (?, ?, ?, 0, 0, 0)`,
-          [guildId, member.id, member.joinedAt?.getTime() || Date.now()]
-        );
+        try {
+          const res = await db.run(
+            `INSERT OR IGNORE INTO members
+             (guildId, userId, joinedAt, processed, blacklisted, warnings)
+             VALUES (?, ?, ?, 0, 0, 0)`,
+            [guildId, member.id, member.joinedAt?.getTime() || Date.now()]
+          );
 
-        if (res.changes > 0) added++;
-        await verifyMember(interaction.guild, member.id);
+          if (res.changes > 0) added++;
+          await verifyMember(interaction.guild, member.id);
+        } catch (err) {
+          console.error('Error processing member:', member.id, err);
+        }
       }
 
       return await interaction.editReply({
@@ -674,7 +678,7 @@ client.on('interactionCreate', async interaction => {
     await ensureMemberRecord(guildId, user.id, Date.now());
     await verifyMember(interaction.guild, user.id);
 
-    return interaction.editReply({
+    return await interaction.editReply({
       embeds: [embed('Scan Complete', `Checked ${user.tag}`, color)]
     });
   }
