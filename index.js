@@ -909,6 +909,8 @@ client.on('interactionCreate', async interaction => {
 
 client.once('ready', async () => {
   console.log(`Logged in as ${client.user.tag}`);
+  console.log('process.cwd():', process.cwd());
+  console.log('resolved database path:', require('path').resolve('./database.db'));
   await replayDynoEventsForAllGuilds();
   await restoreVerificationTimers();
 });
