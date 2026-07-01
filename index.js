@@ -675,12 +675,19 @@ client.on('interactionCreate', async interaction => {
     await interaction.deferReply();
     const user = interaction.options.getUser('user');
 
-    await ensureMemberRecord(guildId, user.id, Date.now());
-    await verifyMember(interaction.guild, user.id);
+    try {
+      await ensureMemberRecord(guildId, user.id, Date.now());
+      await verifyMember(interaction.guild, user.id);
 
-    return await interaction.editReply({
-      embeds: [embed('Scan Complete', `Checked ${user.tag}`, color)]
-    });
+      return await interaction.editReply({
+        embeds: [embed('Scan Complete', `Checked ${user.tag}`, color)]
+      });
+    } catch (err) {
+      console.error('Scan member error:', err);
+      return await interaction.editReply({
+        embeds: [embed('Scan Failed', 'The scan could not be completed.', color)]
+      });
+    }
   }
 
   if (interaction.commandName === 'setlogchannel') {
