@@ -118,7 +118,7 @@ async function getGuildConfig(guildId) {
 async function getMemberRecord(guildId, userId) {
   if (!db) return null;
 
-  return db.get(
+  return await db.get(
     `SELECT * FROM members WHERE guildId = ? AND userId = ?`,
     [guildId, userId]
   );
