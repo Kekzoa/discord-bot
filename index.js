@@ -550,26 +550,33 @@ client.on('interactionCreate', async interaction => {
   if (interaction.commandName === 'scanmembers') {
     await interaction.deferReply();
 
-    const members = await interaction.guild.members.fetch();
-    let added = 0;
+    try {
+      const members = await interaction.guild.members.fetch();
+      let added = 0;
 
-    for (const member of members.values()) {
-      if (member.user.bot) continue;
+      for (const member of members.values()) {
+        if (member.user.bot) continue;
 
-      const res = await db.run(
-        `INSERT OR IGNORE INTO members
-         (guildId, userId, joinedAt, processed, blacklisted, warnings)
-         VALUES (?, ?, ?, 0, 0, 0)`,
-        [guildId, member.id, member.joinedAt?.getTime() || Date.now()]
-      );
+        const res = await db.run(
+          `INSERT OR IGNORE INTO members
+           (guildId, userId, joinedAt, processed, blacklisted, warnings)
+           VALUES (?, ?, ?, 0, 0, 0)`,
+          [guildId, member.id, member.joinedAt?.getTime() || Date.now()]
+        );
 
-      if (res.changes > 0) added++;
-      await verifyMember(interaction.guild, member.id);
+        if (res.changes > 0) added++;
+        await verifyMember(interaction.guild, member.id);
+      }
+
+      return await interaction.editReply({
+        embeds: [embed('Scan Complete', `Added ${added} members and ran verification`, color)]
+      });
+    } catch (err) {
+      console.error('Scan members error:', err);
+      return await interaction.editReply({
+        embeds: [embed('Scan Failed', 'The scan could not be completed.', color)]
+      });
     }
-
-    return interaction.editReply({
-      embeds: [embed('Scan Complete', `Added ${added} members and ran verification`, color)]
-    });
   }
 
   if (interaction.commandName === 'memberstats') {
