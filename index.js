@@ -277,6 +277,19 @@ async function verifyMember(guild, userId) {
     const requiredTimeMs = Number(config.requiredMemberTimeMs ?? DEFAULT_REQUIRED_MEMBER_TIME_MS);
     const warningLimit = config.warningLimit === null || config.warningLimit === undefined ? null : Number(config.warningLimit);
 
+    console.log('verifyMember diagnostics', {
+      guildId: guild.id,
+      userId,
+      joinedAtValue,
+      joinedAtIso: new Date(joinedAtValue).toISOString(),
+      requiredTimeMs,
+      requiredTimeDays: requiredTimeMs / (1000 * 60 * 60 * 24),
+      config,
+      record,
+      now: Date.now(),
+      elapsedMs: Date.now() - joinedAtValue
+    });
+
     const timeMet = (Date.now() - joinedAtValue) >= requiredTimeMs;
     const warningMet = warningLimit === null || warnings < warningLimit;
     const qualified = timeMet && warningMet;
