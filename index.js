@@ -239,6 +239,7 @@ async function getGuildConfig(guildId) {
     [guildId]
   );
 
+  console.log('getGuildConfig read', { guildId, config });
   return config || {};
 }
 
@@ -693,13 +694,24 @@ client.on('interactionCreate', async interaction => {
       return interaction.reply({ content: 'Invalid time format', ephemeral: true });
     }
 
-    await db.run(
-      `INSERT INTO guilds (guildId, requiredMemberTimeMs)
+    console.log('setmembertime parsed duration', { ms, guildId, input: interaction.options.getString('time') });
+    console.log('setmembertime guildId', guildId);
+
+    const sql = `INSERT INTO guilds (guildId, requiredMemberTimeMs)
        VALUES (?, ?)
        ON CONFLICT(guildId)
-       DO UPDATE SET requiredMemberTimeMs=excluded.requiredMemberTimeMs`,
-      [guildId, ms]
+       DO UPDATE SET requiredMemberTimeMs=excluded.requiredMemberTimeMs`;
+    const params = [guildId, ms];
+    console.log('setmembertime SQL', { sql, params });
+
+    const result = await db.run(sql, params);
+    console.log('setmembertime write result', result);
+
+    const verifyRow = await db.get(
+      `SELECT guildId, requiredMemberTimeMs FROM guilds WHERE guildId = ?`,
+      [guildId]
     );
+    console.log('setmembertime verify row after write', verifyRow);
 
     return interaction.reply({
       embeds: [embed('Updated', 'Time set', color)]
