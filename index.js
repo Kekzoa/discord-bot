@@ -69,9 +69,12 @@ async function scheduleVerification(guildId, userId) {
       // Schedule verification for future time
       const timerId = setTimeout(async () => {
         try {
+          console.log('Timer fired for', guildId, userId);
           const guild = await resolveGuild();
           if (guild) {
-            await verifyMember(guild, userId);
+            console.log('Calling verifyMember for', guildId, userId);
+            const result = await verifyMember(guild, userId);
+            console.log('verifyMember returned for', guildId, userId, result);
           }
         } catch (err) {
           console.error('Scheduled verification error:', err);
@@ -208,6 +211,24 @@ function parseTime(input) {
     case 'h': return value * 60 * 60 * 1000;
     case 'd': return value * 24 * 60 * 60 * 1000;
   }
+}
+
+function formatDuration(ms) {
+  if (ms === null || ms === undefined || Number.isNaN(ms)) return 'Unknown';
+
+  const totalSeconds = Math.floor(ms / 1000);
+  const days = Math.floor(totalSeconds / 86400);
+  const hours = Math.floor((totalSeconds % 86400) / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+
+  const parts = [];
+  if (days) parts.push(`${days}d`);
+  if (hours) parts.push(`${hours}h`);
+  if (minutes) parts.push(`${minutes}m`);
+  if (seconds || parts.length === 0) parts.push(`${seconds}s`);
+
+  return parts.join(' ');
 }
 
 async function getGuildConfig(guildId) {
@@ -773,14 +794,45 @@ client.on('interactionCreate', async interaction => {
   if (interaction.commandName === 'verifycheck') {
     const user = interaction.options.getUser('user');
     const result = await verifyMember(interaction.guild, user.id);
+    const member = await interaction.guild.members.fetch(user.id).catch(() => null);
+    const record = await getMemberRecord(guildId, user.id);
+    const config = await getGuildConfig(guildId);
+    const roleId = config.memberRoleId;
+    const role = roleId ? await interaction.guild.roles.fetch(roleId).catch(() => null) : null;
+    const warnings = Number(record?.warnings || 0);
+    const warningLimit = config.warningLimit === null || config.warningLimit === undefined ? null : Number(config.warningLimit);
+    const requiredTimeMs = Number(config.requiredMemberTimeMs ?? DEFAULT_REQUIRED_MEMBER_TIME_MS);
+    const joinedAtValue = Number(result.joinedAtValue || record?.joinedAt || Date.now());
+    const joinDate = new Date(joinedAtValue).toISOString();
+    const timeRemainingMs = Math.max(0, (joinedAtValue + requiredTimeMs) - Date.now());
+    const timeRequirementMet = Boolean(result.timeMet);
+    const warningsRequirementMet = Boolean(result.warningMet);
+    const roleAssigned = Boolean(member?.roles?.cache?.has(role?.id || ''));
+    const shouldAssignRole = Boolean(result.qualified && roleId);
+    const reasons = [];
+
+    if (!timeRequirementMet) reasons.push('time requirement');
+    if (!warningsRequirementMet) reasons.push('warning limit');
+
+    const description = result.qualified
+      ? 'The member is qualified.'
+      : `The member is not qualified because ${reasons.join(' and ')}.`;
 
     return interaction.reply({
       embeds: [
-        embed(
-          'Verification Check',
-          `User: ${user.tag}\nQualified: ${result.qualified ? 'Yes' : 'No'}`,
-          color
-        )
+        embed('Verification Check', description, color)
+          .addFields(
+            { name: 'Qualified', value: result.qualified ? 'Yes' : 'No', inline: true },
+            { name: 'Time requirement met', value: timeRequirementMet ? 'Yes' : 'No', inline: true },
+            { name: 'Warnings requirement met', value: warningsRequirementMet ? 'Yes' : 'No', inline: true },
+            { name: 'Current warnings', value: `${warnings}`, inline: true },
+            { name: 'Warning limit', value: warningLimit === null ? 'No limit' : `${warningLimit}`, inline: true },
+            { name: 'Join date', value: joinDate, inline: false },
+            { name: 'Required member time', value: formatDuration(requiredTimeMs), inline: true },
+            { name: 'Time remaining until qualification', value: result.qualified ? 'Already qualified' : formatDuration(timeRemainingMs), inline: true },
+            { name: 'Member role currently assigned', value: roleAssigned ? 'Yes' : 'No', inline: true },
+            { name: 'Bot believes role should be assigned', value: shouldAssignRole ? 'Yes' : 'No', inline: true }
+          )
       ]
     });
   }
