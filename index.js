@@ -12,6 +12,9 @@ const sqlite3 = require('sqlite3');
 const { open } = require('sqlite');
 require('dotenv').config();
 
+console.log("TOKEN exists:", !!process.env.TOKEN);
+console.log("CLIENT_ID exists:", !!process.env.CLIENT_ID);
+
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
